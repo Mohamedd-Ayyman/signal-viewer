@@ -1,10 +1,13 @@
-"""PDF report generation (built in code with ReportLab, not a screenshot).
+"""PDF report generation, built in code with ReportLab (never a screenshot turned into a PDF).
 
-The report contains a title block, one or more graph snapshots and a
-statistics table (mean, std, min, max, duration, sampling rate) per signal.
+Layout: a title block with a summary, a statistics table (mean, std, duration,
+min, max, sampling rate) for every signal in each graph, then each snapshot with
+its caption and a table of the signals it shows. Long reports flow onto as many
+pages as needed, with page numbers.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Iterable
 
@@ -12,19 +15,26 @@ from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib.units import cm
-from reportlab.platypus import Image, PageBreak, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+from reportlab.platypus import Image, KeepTogether, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 from .signal_model import Signal
 
-_HEADERS = ["Signal", "Mean", "Std", "Min", "Max", "Duration (s)", "Fs (Hz)"]
+TABLE_COLUMNS = ["Signal", "Mean", "Std", "Min", "Max", "Duration (s)", "Fs (Hz)"]
+PAGE_MARGIN = 1.8 * cm
 
 
-def _stats_table(signals: Iterable[Signal]) -> Table:
-    rows = [_HEADERS]
-    for s in signals:
-        st = s.statistics()
-        rows.append([st["Signal"]] + [f"{st[h]:.3f}" for h in _HEADERS[1:]])
-    table = Table(rows, repeatRows=1, hAlign="LEFT")
+@dataclass
+class Snapshot:
+    caption: str
+    image_path: str
+    statistics: list[dict]     # one row per signal visible when the snapshot was taken
+
+
+def _statistics_table(rows: Iterable[dict]) -> Table:
+    table_rows = [TABLE_COLUMNS]
+    for statistics in rows:
+        table_rows.append([statistics["Signal"]] + [f"{statistics[column]:.3f}" for column in TABLE_COLUMNS[1:]])
+    table = Table(table_rows, repeatRows=1, hAlign="LEFT")
     table.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#1f2a44")),
         ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
@@ -40,38 +50,46 @@ def _stats_table(signals: Iterable[Signal]) -> Table:
     return table
 
 
-def build_report(path: str, snapshots: list[tuple[str, str]], groups: dict[str, list[Signal]],
-                 title: str = "Biomedical Signal Report") -> str:
-    """Write a PDF to *path*.
+def _draw_page_number(canvas, document):
+    canvas.saveState()
+    canvas.setFont("Helvetica", 8)
+    canvas.setFillColor(colors.HexColor("#6b7280"))
+    canvas.drawRightString(A4[0] - PAGE_MARGIN, 1.0 * cm, f"Page {document.page}")
+    canvas.drawString(PAGE_MARGIN, 1.0 * cm, "Signal Viewer report")
+    canvas.restoreState()
 
-    snapshots: list of (caption, png_path)
-    groups:    {"Graph 1": [signals...], "Graph 2": [...]} for the statistics tables
-    """
+
+def build_report(path: str, snapshots: list[Snapshot], signals_by_graph: dict[str, list[Signal]],
+                 title: str = "Biomedical Signal Report") -> str:
+    """Write the PDF to *path* and return the path."""
     styles = getSampleStyleSheet()
-    doc = SimpleDocTemplate(path, pagesize=A4, leftMargin=1.8 * cm, rightMargin=1.8 * cm,
-                            topMargin=1.6 * cm, bottomMargin=1.6 * cm, title=title)
+    document = SimpleDocTemplate(path, pagesize=A4, leftMargin=PAGE_MARGIN, rightMargin=PAGE_MARGIN,
+                                 topMargin=1.6 * cm, bottomMargin=1.8 * cm, title=title)
+    signal_count = sum(len(signals) for signals in signals_by_graph.values())
     story = [
         Paragraph(title, styles["Title"]),
-        Paragraph(f"Generated {datetime.now():%Y-%m-%d %H:%M}", styles["Normal"]),
+        Paragraph(f"Generated {datetime.now():%Y-%m-%d %H:%M} · {signal_count} signal(s) · "
+                  f"{len(snapshots)} snapshot(s)", styles["Normal"]),
         Spacer(1, 0.5 * cm),
     ]
 
-    for name, signals in groups.items():
-        if not signals:
-            continue
-        story += [Paragraph(f"{name}: signal statistics", styles["Heading2"]), _stats_table(signals),
-                  Spacer(1, 0.4 * cm)]
+    for graph_name, signals in signals_by_graph.items():
+        if signals:
+            story += [Paragraph(f"{graph_name}: signal statistics", styles["Heading2"]),
+                      _statistics_table(signal.statistics() for signal in signals), Spacer(1, 0.4 * cm)]
 
     if snapshots:
         story.append(Paragraph("Snapshots", styles["Heading2"]))
-        width = A4[0] - 3.6 * cm
-        for i, (caption, png) in enumerate(snapshots):
-            img = Image(png)
-            ratio = img.imageHeight / float(img.imageWidth)
-            img.drawWidth, img.drawHeight = width, width * ratio
-            story += [Paragraph(caption, styles["Italic"]), img, Spacer(1, 0.35 * cm)]
-            if i % 2 == 1 and i != len(snapshots) - 1:
-                story.append(PageBreak())
+        image_width = A4[0] - 2 * PAGE_MARGIN
+        for position, snapshot in enumerate(snapshots):
+            image = Image(snapshot.image_path)
+            image.drawWidth, image.drawHeight = image_width, image_width * image.imageHeight / float(image.imageWidth)
+            block = [Paragraph(snapshot.caption, styles["Italic"]), Spacer(1, 0.15 * cm), image, Spacer(1, 0.2 * cm)]
+            if snapshot.statistics:
+                block.append(_statistics_table(snapshot.statistics))
+            story.append(KeepTogether(block))
+            if position < len(snapshots) - 1:
+                story.append(Spacer(1, 0.5 * cm))
 
-    doc.build(story)
+    document.build(story, onFirstPage=_draw_page_number, onLaterPages=_draw_page_number)
     return path
