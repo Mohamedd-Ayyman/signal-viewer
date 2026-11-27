@@ -81,13 +81,15 @@ def build_report(path: str, snapshots: list[Snapshot], signals_by_graph: dict[st
     if snapshots:
         story.append(Paragraph("Snapshots", styles["Heading2"]))
         image_width = A4[0] - 2 * PAGE_MARGIN
-        for snapshot in snapshots:
+        for position, snapshot in enumerate(snapshots):
             image = Image(snapshot.image_path)
             image.drawWidth, image.drawHeight = image_width, image_width * image.imageHeight / float(image.imageWidth)
             block = [Paragraph(snapshot.caption, styles["Italic"]), Spacer(1, 0.15 * cm), image, Spacer(1, 0.2 * cm)]
             if snapshot.statistics:
                 block.append(_statistics_table(snapshot.statistics))
-            story += [KeepTogether(block), Spacer(1, 0.5 * cm)]
+            story.append(KeepTogether(block))
+            if position < len(snapshots) - 1:
+                story.append(Spacer(1, 0.5 * cm))
 
     document.build(story, onFirstPage=_draw_page_number, onLaterPages=_draw_page_number)
     return path
