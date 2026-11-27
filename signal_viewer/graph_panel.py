@@ -270,7 +270,7 @@ class GraphPanel(QtWidgets.QGroupBox):
         self._emit_view_state()
 
     def _advance_frame(self):
-        if not self.signals:
+        if not self.signals or not self.is_playing:
             return
         self.cine_time += self.speed * FRAME_INTERVAL_MS / 1000.0
         if self.cine_time >= self.end_time:
