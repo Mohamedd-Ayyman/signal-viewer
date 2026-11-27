@@ -1,10 +1,11 @@
-"""Main window: two graph panels, graph linking and PDF reporting."""
+"""Main window: two identical graph panels, graph linking and PDF reporting."""
 from __future__ import annotations
 
 from PyQt5 import QtCore, QtWidgets
 
 from .graph_panel import GraphPanel
-from .report import build_report
+from .report import Snapshot, build_report
+from .signal_model import Signal
 
 
 class MainWindow(QtWidgets.QMainWindow):
@@ -12,68 +13,77 @@ class MainWindow(QtWidgets.QMainWindow):
         super().__init__()
         self.setWindowTitle("Signal Viewer: Multi-Channel Biomedical Monitor")
         self.resize(1400, 900)
-        self.snapshots: list[tuple[str, str]] = []
-        self.linked = False
+        self.snapshots: list[Snapshot] = []
+        self.is_linked = False
 
-        self.g1 = GraphPanel("Graph 1")
-        self.g2 = GraphPanel("Graph 2")
-        for g, other in ((self.g1, self.g2), (self.g2, self.g1)):
-            g.moveRequested.connect(lambda sig, src=g, dst=other: dst.add_signal(src.take_signal(sig)))
-            g.stateChanged.connect(lambda st, dst=other: self._sync(st, dst))
-            g.status.connect(self.statusBar().showMessage)
-        self.g1.ticked.connect(lambda t: self.linked and self.g2.follow(t))
+        self.top_graph = GraphPanel("Graph 1")
+        self.bottom_graph = GraphPanel("Graph 2")
+        for source_graph, other_graph in ((self.top_graph, self.bottom_graph), (self.bottom_graph, self.top_graph)):
+            source_graph.moveRequested.connect(
+                lambda signal, source=source_graph, target=other_graph: target.add_signal(source.take_signal(signal)))
+            source_graph.viewStateChanged.connect(lambda state, target=other_graph: self._mirror_view(state, target))
+            source_graph.statusMessage.connect(self.statusBar().showMessage)
+        self.top_graph.cineTimeAdvanced.connect(
+            lambda leader_time: self.is_linked and self.bottom_graph.follow(leader_time))
 
         splitter = QtWidgets.QSplitter(QtCore.Qt.Vertical)
-        splitter.addWidget(self.g1)
-        splitter.addWidget(self.g2)
+        splitter.addWidget(self.top_graph)
+        splitter.addWidget(self.bottom_graph)
         self.setCentralWidget(splitter)
 
-        tb = self.addToolBar("Main")
-        tb.setMovable(False)
-        self.link_action = tb.addAction("🔗 Link graphs")
+        toolbar = self.addToolBar("Main")
+        toolbar.setMovable(False)
+        self.link_action = toolbar.addAction("🔗 Link graphs")
         self.link_action.setCheckable(True)
         self.link_action.toggled.connect(self.set_linked)
-        tb.addSeparator()
-        tb.addAction("📷 Snapshot both", self.snapshot_both)
-        tb.addAction("📄 Export PDF report", self.export_report)
-        self.snap_label = QtWidgets.QLabel("  Snapshots: 0")
-        tb.addWidget(self.snap_label)
-        self.statusBar().showMessage("Open a signal in either graph to start (File icon on each graph).")
+        toolbar.addSeparator()
+        toolbar.addAction("📷 Snapshot both", self.snapshot_both)
+        toolbar.addAction("📄 Export PDF report", self.export_report)
+        toolbar.addAction("🗑 Clear snapshots", self.clear_snapshots)
+        self.snapshot_count_label = QtWidgets.QLabel("  Snapshots: 0")
+        toolbar.addWidget(self.snapshot_count_label)
+        self.statusBar().showMessage("Open signals in either graph with its folder button. Any number of signals per graph.")
 
     # ---------------------------------------------------------------- link
-    def set_linked(self, on: bool):
-        self.linked = on
-        self.g2.follower = on            # Graph 1's clock drives Graph 2 while linked
-        if on:
-            self.g2.timer.stop()
-            self.g2.apply_state(self.g1.state())
-        elif self.g2.playing:
-            self.g2.timer.start()
-        self.statusBar().showMessage("Graphs linked: time, speed, zoom and pan are shared." if on
+    def set_linked(self, linked: bool):
+        self.is_linked = linked
+        self.bottom_graph.is_follower = linked      # Graph 1's clock drives Graph 2 while linked
+        if linked:
+            self.bottom_graph.frame_timer.stop()
+            self.bottom_graph.apply_view_state(self.top_graph.view_state())
+        elif self.bottom_graph.is_playing:
+            self.bottom_graph.frame_timer.start()
+        self.statusBar().showMessage("Graphs linked: time frame, speed, zoom and pan are shared." if linked
                                      else "Graphs unlinked: each graph runs independently.")
 
-    def _sync(self, state: dict, target: GraphPanel):
-        if self.linked:
-            target.apply_state(state)
+    def _mirror_view(self, state: dict, target_graph: GraphPanel):
+        if self.is_linked:
+            target_graph.apply_view_state(state)
 
     # ------------------------------------------------------------- report
-    def add_snapshot(self, caption: str, path: str):
-        self.snapshots.append((caption, path))
-        self.snap_label.setText(f"  Snapshots: {len(self.snapshots)}")
+    def add_snapshot(self, caption: str, image_path: str, signals: list[Signal]):
+        shown_signals = [signal for signal in signals if signal.visible]
+        self.snapshots.append(Snapshot(caption, image_path, [signal.statistics() for signal in shown_signals]))
+        self.snapshot_count_label.setText(f"  Snapshots: {len(self.snapshots)}")
         self.statusBar().showMessage(f"Snapshot saved: {caption}")
 
     def snapshot_both(self):
-        for g in (self.g1, self.g2):
-            if g.signals:
-                g.take_snapshot()
+        for graph in (self.top_graph, self.bottom_graph):
+            if graph.signals:
+                graph.take_snapshot()
+
+    def clear_snapshots(self):
+        self.snapshots.clear()
+        self.snapshot_count_label.setText("  Snapshots: 0")
 
     def export_report(self):
-        if not (self.g1.signals or self.g2.signals):
+        if not (self.top_graph.signals or self.bottom_graph.signals):
             QtWidgets.QMessageBox.information(self, "Nothing to report", "Open at least one signal first.")
             return
-        path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Save report", "signal_report.pdf", "PDF (*.pdf)")
-        if not path:
+        report_path, _ = QtWidgets.QFileDialog.getSaveFileName(self, "Save report", "signal_report.pdf", "PDF (*.pdf)")
+        if not report_path:
             return
-        build_report(path, self.snapshots, {"Graph 1": self.g1.signals, "Graph 2": self.g2.signals})
+        build_report(report_path, self.snapshots,
+                     {"Graph 1": self.top_graph.signals, "Graph 2": self.bottom_graph.signals})
         QtWidgets.QMessageBox.information(self, "Report saved",
-                                          f"Report with {len(self.snapshots)} snapshot(s) saved to:\n{path}")
+                                          f"Report with {len(self.snapshots)} snapshot(s) saved to:\n{report_path}")
